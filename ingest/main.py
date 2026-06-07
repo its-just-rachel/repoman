@@ -92,6 +92,9 @@ SF = dict(
     enrichment_rationale = "fldbimOOeZk5cf2MN",
     pipeline_suggestion  = "fldXSJhsDdORTGafM",
     source               = "fldvqlOKqvlIOM7FP",   # multipleRecordLinks → Sources
+    tl_dr                = "fldRDTrdresooZpZC",   # singleSelect: Tech Lead / Don't Read
+    why_read_skip        = "fldgcrntMCFY4uXsF",   # long text: Why Read or Why Skip rationale
+    submission_source    = "fldr1cfzD7V3bpjFg",   # singleSelect: Pipeline / Submitted
 )
 
 # Evaluation Run field IDs
@@ -227,8 +230,20 @@ Watch it, evaluate it, prototype with it, or act on it now? Why?
 No vague superlatives. No "this is exciting." Write like you're briefing a skeptical \
 staff engineer who has seen a lot of hype.
 
+Also classify each signal for executive leadership:
+- "Tech Lead": leadership SHOULD know about this — novel capability, market-moving development, \
+competitive threat, or paradigm shift that would embarrass them not to know a quarter from now.
+- "Don't Read": will circulate widely but safe to skip — known hype cycle, incremental update, \
+too niche, or too early-stage to act on.
+- null: insufficient signal to classify confidently.
+
 Return a JSON array — one object per signal, same order as input, no other text.
-Each object: {{"insight": "..."}}
+Each object:
+{{
+  "insight": "4-6 sentence deep summary",
+  "tl_dr": "Tech Lead" or "Don't Read" or null,
+  "why_read_skip": "2-3 sentence exec-readable Why Read or Why Skip rationale"
+}}
 
 Signals:
 {signals_json}"""
@@ -587,6 +602,7 @@ def _build_signal_record(item: dict, cls: dict) -> dict:
         SF["availability_score"]:   _clamp(cls.get("availability_score"), 0.0, 10.0, 5.0),
         SF["corroboration_count"]:  0,
         SF["source"]:               [item["_source_id"]],
+        SF["submission_source"]:    "Pipeline",
     }
 
     # Optional fields — only set when non-empty
@@ -909,10 +925,17 @@ def generate_insights(records: list[dict], client: Anthropic, context: str = "")
 
             for k, (orig_idx, _) in enumerate(batch):
                 if k < len(insights):
-                    insight_text = insights[k].get("insight", "").strip()
+                    ins = insights[k]
+                    insight_text = ins.get("insight", "").strip()
                     if insight_text:
                         updated[orig_idx] = dict(updated[orig_idx])   # copy before mutating
                         updated[orig_idx][SF["summary"]] = insight_text
+                    tl_dr = ins.get("tl_dr")
+                    if tl_dr in ("Tech Lead", "Don't Read"):
+                        updated[orig_idx][SF["tl_dr"]] = tl_dr
+                    why = ins.get("why_read_skip", "").strip()
+                    if why:
+                        updated[orig_idx][SF["why_read_skip"]] = why
 
         except Exception as e:
             log.error(

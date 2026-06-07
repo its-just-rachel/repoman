@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Frontier Tech — Signal Submission</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #0f1117;
+      --surface:     #1a1d27;
+      --surface2:    #22263a;
+      --border:      #2e3349;
+      --text:        #e2e8f0;
+      --text-muted:  #7c85a2;
+      --accent:      #6366f1;
+      --tl-bg:       #0d2e1a;
+      --tl-border:   #16a34a;
+      --tl-text:     #4ade80;
+      --dr-bg:       #2e1a0a;
+      --dr-border:   #d97706;
+      --dr-text:     #fbbf24;
+      --error-bg:    #2e1111;
+      --error-border:#dc2626;
+      --error-text:  #f87171;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 16px 80px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 680px;
+    }
+
+    header {
+      margin-bottom: 40px;
+    }
+
+    .wordmark {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 8px;
+    }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+
+    .subtitle {
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px;
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+      letter-spacing: 0.02em;
+    }
+
+    input[type="text"], textarea {
+      width: 100%;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 14px;
+      font-family: inherit;
+      padding: 10px 14px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    input[type="text"]:focus, textarea:focus {
+      border-color: var(--accent);
+    }
+
+    input[type="text"]::placeholder, textarea::placeholder {
+      color: var(--text-muted);
+      opacity: 0.6;
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 72px;
+    }
+
+    .field + .field { margin-top: 18px; }
+
+    button[type="submit"] {
+      margin-top: 22px;
+      width: 100%;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 12px;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    button[type="submit"]:hover { opacity: 0.88; }
+    button[type="submit"]:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* ── Spinner ── */
+    .spinner-wrap {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      padding: 36px 0;
+    }
+
+    .spinner-wrap.visible { display: flex; }
+
+    .spinner {
+      width: 36px; height: 36px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .spinner-label { color: var(--text-muted); font-size: 13px; }
+
+    /* ── Result ── */
+    #result { display: none; }
+    #result.visible { display: block; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 5px 12px;
+      border-radius: 20px;
+      margin-bottom: 16px;
+    }
+
+    .badge.tl {
+      background: var(--tl-bg);
+      border: 1px solid var(--tl-border);
+      color: var(--tl-text);
+    }
+
+    .badge.dr {
+      background: var(--dr-bg);
+      border: 1px solid var(--dr-border);
+      color: var(--dr-text);
+    }
+
+    .result-title {
+      font-size: 17px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    .result-description {
+      color: var(--text-muted);
+      font-size: 14px;
+      margin-bottom: 20px;
+    }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .rationale-box {
+      border-left: 3px solid var(--accent);
+      padding: 12px 16px;
+      background: var(--surface2);
+      border-radius: 0 8px 8px 0;
+      font-size: 14px;
+      line-height: 1.65;
+      margin-bottom: 20px;
+    }
+
+    .summary-box {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      font-size: 13.5px;
+      line-height: 1.7;
+      color: #c4cde0;
+      margin-bottom: 20px;
+    }
+
+    .meta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+
+    .tag {
+      font-size: 11.5px;
+      font-weight: 500;
+      padding: 3px 10px;
+      border-radius: 4px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+
+    .digest-note {
+      font-size: 13px;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--tl-text);
+      flex-shrink: 0;
+    }
+
+    .dot.dr { background: var(--dr-text); }
+
+    .error-box {
+      background: var(--error-bg);
+      border: 1px solid var(--error-border);
+      color: var(--error-text);
+      border-radius: 8px;
+      padding: 14px 16px;
+      font-size: 13.5px;
+    }
+
+    .reset-btn {
+      margin-top: 20px;
+      width: 100%;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      border-radius: 8px;
+      font-size: 13px;
+      padding: 10px;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+
+    .reset-btn:hover { border-color: var(--text-muted); color: var(--text); }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <header>
+      <div class="wordmark">Frontier Tech</div>
+      <h1>Signal Submission</h1>
+      <p class="subtitle">Paste a link to analyze it immediately — Tech Lead or Don't Read.</p>
+    </header>
+
+    <!-- ── Submission form ── -->
+    <div class="card" id="form-card">
+      <form id="submit-form">
+        <div class="field">
+          <label for="url">Article URL</label>
+          <input type="text" id="url" name="url"
+                 placeholder="https://..." autocomplete="off" required />
+        </div>
+        <div class="field">
+          <label for="note">Context note <span style="font-weight:400;opacity:.6">(optional)</span></label>
+          <textarea id="note" name="note"
+                    placeholder="Why are you sending this? What should we know?"></textarea>
+        </div>
+        <button type="submit" id="submit-btn">Analyze</button>
+      </form>
+
+      <div class="spinner-wrap" id="spinner">
+        <div class="spinner"></div>
+        <div class="spinner-label">Analyzing…</div>
+      </div>
+    </div>
+
+    <!-- ── Result ── -->
+    <div class="card" id="result"></div>
+
+  </div>
+
+  <script>
+    const form      = document.getElementById("submit-form");
+    const submitBtn = document.getElementById("submit-btn");
+    const spinner   = document.getElementById("spinner");
+    const resultEl  = document.getElementById("result");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const url  = document.getElementById("url").value.trim();
+      const note = document.getElementById("note").value.trim();
+      if (!url) return;
+
+      // Show spinner, hide form fields
+      form.style.display = "none";
+      spinner.classList.add("visible");
+      resultEl.style.display = "none";
+      resultEl.classList.remove("visible");
+      resultEl.innerHTML = "";
+
+      try {
+        const resp = await fetch("/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url, note }),
+        });
+        const data = await resp.json();
+
+        spinner.classList.remove("visible");
+
+        if (!resp.ok || data.error) {
+          resultEl.innerHTML = `<div class="error-box">${data.error || "An error occurred."}</div>
+            <button class="reset-btn" onclick="resetForm()">Try another URL</button>`;
+        } else {
+          resultEl.innerHTML = buildResult(data);
+        }
+
+        resultEl.classList.add("visible");
+        resultEl.style.display = "block";
+
+      } catch (err) {
+        spinner.classList.remove("visible");
+        resultEl.innerHTML = `<div class="error-box">Network error: ${err.message}</div>
+          <button class="reset-btn" onclick="resetForm()">Try again</button>`;
+        resultEl.classList.add("visible");
+        resultEl.style.display = "block";
+      }
+    });
+
+    function buildResult(d) {
+      const isTL   = d.tl_dr === "Tech Lead";
+      const isDR   = d.tl_dr === "Don't Read";
+      const icon   = isTL ? "●" : isDR ? "●" : "○";
+      const cls    = isTL ? "tl" : "dr";
+      const label  = d.tl_dr || "Unclassified";
+
+      const metaTags = [
+        d.quadrant,
+        ...(d.verticals || []),
+        d.confidence ? `${Math.round(d.confidence * 100)}% confidence` : null,
+      ].filter(Boolean).map(t => `<span class="tag">${t}</span>`).join("");
+
+      const digestNote = d.saved
+        ? `<div class="digest-note"><span class="dot ${isDR ? 'dr' : ''}"></span>
+            Saved to Airtable · will appear in the next digest as <strong>${label}</strong>
+            ${d.today_count > 1 ? `(${d.today_count} ${label} signals today)` : ''}</div>`
+        : `<div class="digest-note" style="color:var(--error-text)">⚠ Could not save to Airtable — check your API token</div>`;
+
+      return `
+        <span class="badge ${cls}">${icon} ${label}</span>
+        <div class="result-title">${esc(d.title)}</div>
+        <div class="result-description">${esc(d.description)}</div>
+
+        <div class="section-label">${isTL ? "Why Read" : "Why Skip"}</div>
+        <div class="rationale-box">${esc(d.rationale)}</div>
+
+        <div class="section-label">Practitioner summary</div>
+        <div class="summary-box">${esc(d.summary)}</div>
+
+        <div class="meta-row">${metaTags}</div>
+        ${digestNote}
+
+        <button class="reset-btn" onclick="resetForm()">Submit another URL</button>
+      `;
+    }
+
+    function esc(str) {
+      return (str || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    function resetForm() {
+      form.style.display = "block";
+      resultEl.style.display = "none";
+      resultEl.classList.remove("visible");
+      resultEl.innerHTML = "";
+      document.getElementById("url").value = "";
+      document.getElementById("note").value = "";
+      document.getElementById("url").focus();
+    }
+  </script>
+</body>
+</html>
