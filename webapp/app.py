@@ -168,7 +168,7 @@ def count_today_tl_dr(tl_dr_value: str) -> int:
         return 0
 
 
-def write_to_airtable(url: str, note: str, analysis: dict) -> str | None:
+def write_to_airtable(url: str, note: str, analysis: dict):
     """Write the analyzed signal to Airtable. Returns record ID or None on failure."""
     quadrant = analysis.get("quadrant", "Tools")
     if quadrant not in VALID_QUADRANTS:
