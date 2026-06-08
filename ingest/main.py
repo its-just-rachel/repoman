@@ -143,7 +143,7 @@ RSS_SOURCES = [
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Only consider items published within this window
-LOOKBACK_DAYS = 2
+LOOKBACK_DAYS = 14
 
 # ArXiv categories to monitor
 ARXIV_CATEGORIES  = ["cs.AI", "cs.LG", "cs.CL", "cs.CV", "cs.RO"]
@@ -265,7 +265,7 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def _parse_iso(s: str) -> datetime | None:
+def _parse_iso(s: str):
     """Parse an ISO 8601 string; return None on failure."""
     if not s:
         return None
@@ -275,7 +275,7 @@ def _parse_iso(s: str) -> datetime | None:
         return None
 
 
-def _struct_to_dt(st) -> datetime | None:
+def _struct_to_dt(st):
     """Convert a feedparser struct_time to an aware datetime (UTC)."""
     if st is None:
         return None
