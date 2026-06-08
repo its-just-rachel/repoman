@@ -267,7 +267,8 @@ async def run_poc():
             high_conf = []
             for row in all_predictions:
                 if row.get("PREDICTED"):
-                    url_short = row["ENTITY"].split("/")[-1]
+                    e = row["ENTITY"]
+                    url_short = e if len(e) <= 50 else "..." + e[-47:]
                     score = row["SCORE"]
                     cls   = row["CLASS"]
                     marker = "✓" if score >= CONFIDENCE_THRESHOLD else "~"

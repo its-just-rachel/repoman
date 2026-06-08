@@ -5,7 +5,7 @@ Frontier Tech — Ingestion Pipeline v1
 Fetches signals from:
   - HuggingFace Daily Papers API     (academic, daily)
   - HuggingFace Hub Models API       (api, real-time polling)
-  - 7 RSS feeds                      (lab blogs + Apple)
+  - Active RSS sources               (loaded dynamically from Airtable Sources table)
 
 For each source:
   1. Fetch raw items
@@ -71,6 +71,7 @@ if not ANTHROPIC_KEY:
 
 BASE_ID      = "appwe0lxRHbASBgG2"
 T_SIGNALS    = "tblvgGIVerqksC5FP"
+T_SOURCES    = "tblWu4dga8m9mKijj"
 T_EVAL_RUNS  = "tbltRbDSKKvMSRYJM"
 
 # Signal field IDs
@@ -119,23 +120,6 @@ HF_PAPERS_SOURCE_ID  = "recDq5d2NTrgWmwp9"
 HF_MODELS_SOURCE_ID  = "recPC61U0alTeD28K"
 ARXIV_SOURCE_ID      = "recWRTkdybGkatYWz"
 HARMONIC_SOURCE_ID   = "recUUe3LWP24VlO8a"
-
-RSS_SOURCES = [
-    {"id": "recAsTlPTetqFWV41", "name": "DeepMind Blog",
-     "url": "https://deepmind.google/blog/rss.xml"},
-    {"id": "rece3xIcfJI5vkydq", "name": "MIT AI News",
-     "url": "https://news.mit.edu/rss/topic/artificial-intelligence2"},
-    {"id": "recFTSkcynFlNmvDb", "name": "Google AI Blog",
-     "url": "https://blog.google/technology/ai/rss/"},
-    {"id": "recn9vYYixi6o5C6J", "name": "BAIR Blog",
-     "url": "https://bair.berkeley.edu/blog/feed.xml"},
-    {"id": "recV1GIbxU8XyFtEK", "name": "OpenAI News",
-     "url": "https://openai.com/news/rss.xml"},
-    {"id": "recPmCZCXEUdaAuaC", "name": "Apple Developer News",
-     "url": "https://developer.apple.com/news/releases/rss/releases.rss"},
-    {"id": "recWvEjOCh1cxDAe6", "name": "Apple Newsroom",
-     "url": "https://www.apple.com/newsroom/rss-feed.rss"},
-]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -330,6 +314,38 @@ def get_existing_urls() -> set[str]:
     return urls
 
 
+def load_rss_sources() -> list[dict]:
+    """
+    Fetch all active RSS sources from the Sources table.
+    Returns [{"id": record_id, "name": name, "url": feed_url}, ...]
+
+    To add or remove an RSS source, toggle the Active checkbox in Airtable —
+    no code changes needed.
+    """
+    sources = []
+    params: dict[str, Any] = {
+        "filterByFormula": 'AND({Active}, {Source Type} = "rss")',
+        "fields[]": ["Name", "URL"],
+        "pageSize": 100,
+    }
+    while True:
+        resp = requests.get(_at_url(T_SOURCES), headers=_at_headers(), params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        for rec in data.get("records", []):
+            fields = rec.get("fields", {})
+            name = fields.get("Name", "")
+            url  = fields.get("URL", "")
+            if name and url:
+                sources.append({"id": rec["id"], "name": name, "url": url})
+        offset = data.get("offset")
+        if not offset:
+            break
+        params["offset"] = offset
+    log.info("Loaded %d active RSS sources from Airtable", len(sources))
+    return sources
+
+
 def write_signals(signals: list[dict], dry_run: bool = False) -> int:
     """
     Write enriched signals to Airtable in batches of 10.
@@ -517,11 +533,136 @@ def fetch_hf_models(existing_urls: set[str]) -> tuple[list[dict], list[str]]:
     return raw, errors
 
 
-def fetch_rss_feeds(existing_urls: set[str]) -> tuple[list[dict], list[str]]:
+def load_reddit_sources() -> list[dict]:
+    """
+    Fetch all active community sources (subreddits) from the Sources table.
+    Returns [{"id": record_id, "name": name, "url": subreddit_base_url}, ...]
+    """
+    sources = []
+    params: dict[str, Any] = {
+        "filterByFormula": 'AND({Active}, {Source Type} = "community")',
+        "fields[]": ["Name", "URL"],
+        "pageSize": 100,
+    }
+    while True:
+        resp = requests.get(_at_url(T_SOURCES), headers=_at_headers(), params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        for rec in data.get("records", []):
+            fields = rec.get("fields", {})
+            name = fields.get("Name", "")
+            url  = fields.get("URL", "")
+            if name and url and "reddit.com" in url:
+                sources.append({"id": rec["id"], "name": name, "url": url})
+        offset = data.get("offset")
+        if not offset:
+            break
+        params["offset"] = offset
+    log.info("Loaded %d Reddit sources from Airtable", len(sources))
+    return sources
+
+
+def fetch_reddit(existing_urls: set[str], reddit_sources: list[dict]) -> tuple[list[dict], list[str]]:
+    """
+    Fetch top posts from the past week for each subreddit via Reddit JSON API.
+    Uses unauthenticated access (60 req/min limit) — sufficient for daily pipeline.
+    To upgrade to OAuth, set REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET in .env.
+    """
     raw, errors = [], []
     cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
 
-    for source in RSS_SOURCES:
+    reddit_id     = os.environ.get("REDDIT_CLIENT_ID", "")
+    reddit_secret = os.environ.get("REDDIT_CLIENT_SECRET", "")
+    use_oauth     = bool(reddit_id and reddit_secret)
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": "frontier-tech-pipeline/1.0 (signal intelligence pipeline)"})
+
+    if use_oauth:
+        try:
+            token_resp = session.post(
+                "https://www.reddit.com/api/v1/access_token",
+                auth=(reddit_id, reddit_secret),
+                data={"grant_type": "client_credentials"},
+                timeout=15,
+            )
+            token_resp.raise_for_status()
+            token = token_resp.json().get("access_token", "")
+            session.headers.update({"Authorization": f"Bearer {token}"})
+            api_base = "https://oauth.reddit.com"
+            log.info("Reddit: using OAuth (authenticated)")
+        except Exception as e:
+            log.warning("Reddit OAuth failed (%s) — falling back to unauthenticated", e)
+            use_oauth = False
+            api_base = "https://www.reddit.com"
+    else:
+        api_base = "https://www.reddit.com"
+        log.info("Reddit: using unauthenticated access")
+
+    for source in reddit_sources:
+        source_count = 0
+        # Extract subreddit path from URL (e.g. https://www.reddit.com/r/MachineLearning → /r/MachineLearning)
+        subreddit_path = source["url"].replace("https://www.reddit.com", "").rstrip("/")
+        api_url = f"{api_base}{subreddit_path}/top.json"
+
+        try:
+            resp = session.get(api_url, params={"t": "week", "limit": 100}, timeout=30)
+            resp.raise_for_status()
+            posts = resp.json().get("data", {}).get("children", [])
+
+            for post in posts:
+                p = post.get("data", {})
+
+                # Use reddit permalink for self-posts, external URL for link posts
+                is_self    = p.get("is_self", False)
+                ext_url    = p.get("url", "")
+                permalink  = f"https://www.reddit.com{p.get('permalink', '')}"
+                signal_url = permalink if is_self else ext_url
+
+                if not signal_url or signal_url in existing_urls:
+                    continue
+
+                # Date filter
+                created_utc = p.get("created_utc", 0)
+                pub_dt = datetime.fromtimestamp(created_utc, tz=timezone.utc) if created_utc else None
+                if pub_dt and pub_dt < cutoff:
+                    continue
+
+                # Build excerpt: selftext body + engagement stats + link if external
+                parts = []
+                selftext = (p.get("selftext") or "").strip()
+                if selftext and selftext not in ("[deleted]", "[removed]"):
+                    parts.append(selftext[:600])
+                parts.append(f"Score: {p.get('score', 0)} | Comments: {p.get('num_comments', 0)}")
+                if not is_self and ext_url:
+                    parts.append(f"Link: {ext_url}")
+
+                raw.append({
+                    "_url":          signal_url,
+                    "_source_id":    source["id"],
+                    "_title":        p.get("title", ""),
+                    "_excerpt":      " | ".join(parts)[:1000],
+                    "_author":       p.get("author", ""),
+                    "_published_at": _iso(pub_dt) if pub_dt else "",
+                })
+                source_count += 1
+
+            log.info("Reddit %-24s %d new items", source["name"] + ":", source_count)
+            time.sleep(0.5)  # gentle pacing between subreddit requests
+
+        except Exception as e:
+            msg = f"Reddit {source['name']} failed: {e}"
+            log.warning(msg)
+            errors.append(msg)
+
+    return raw, errors
+
+
+def fetch_rss_feeds(existing_urls: set[str], rss_sources: list[dict]) -> tuple[list[dict], list[str]]:
+    raw, errors = [], []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
+
+    for source in rss_sources:
         source_count = 0
         try:
             feed = feedparser.parse(source["url"])
@@ -984,16 +1125,24 @@ def run(sources: str = "all", dry_run: bool = False) -> None:
         sources_evaluated += 1
 
     if sources in ("all", "rss"):
-        raw, errs = fetch_rss_feeds(existing_urls)
+        rss_sources = load_rss_sources()
+        raw, errs = fetch_rss_feeds(existing_urls, rss_sources)
         all_raw.extend(raw)
         all_errors.extend(errs)
-        sources_evaluated += len(RSS_SOURCES)
+        sources_evaluated += len(rss_sources)
 
     if sources in ("all", "arxiv"):
         raw, errs = fetch_arxiv(existing_urls)
         all_raw.extend(raw)
         all_errors.extend(errs)
         sources_evaluated += 1
+
+    if sources in ("all", "reddit"):
+        reddit_sources = load_reddit_sources()
+        raw, errs = fetch_reddit(existing_urls, reddit_sources)
+        all_raw.extend(raw)
+        all_errors.extend(errs)
+        sources_evaluated += len(reddit_sources)
 
     if sources in ("all", "harmonic"):
         raw, errs = fetch_harmonic_reports(existing_urls, client)
@@ -1053,7 +1202,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Frontier Tech ingestion pipeline")
     parser.add_argument(
         "--source",
-        choices=["all", "papers", "models", "rss", "arxiv", "harmonic"],
+        choices=["all", "papers", "models", "rss", "arxiv", "harmonic", "reddit"],
         default="all",
         help="Which source group to run (default: all)",
     )
