@@ -120,6 +120,10 @@ HF_PAPERS_SOURCE_ID  = "recDq5d2NTrgWmwp9"
 HF_MODELS_SOURCE_ID  = "recPC61U0alTeD28K"
 ARXIV_SOURCE_ID      = "recWRTkdybGkatYWz"
 HARMONIC_SOURCE_ID   = "recUUe3LWP24VlO8a"
+HN_SOURCE_ID         = "reciB2Pf2VfL7JyvB"
+GITHUB_SOURCE_ID     = "reczmrDR8GsUCNv4i"
+HF_LEADERBOARD_SRC   = "recFnNrVms6gy0Z5d"
+ARENA_SOURCE_ID      = "recGAVr2eaGsPzhHY"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -140,6 +144,30 @@ HARMONIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # HF Models noise filters
 HF_MODELS_LIMIT     = 30   # max models to inspect per run
 HF_MODELS_MIN_LIKES = 10   # skip models with fewer likes than this
+
+# HackerNews (Algolia API — no auth required)
+HN_MIN_POINTS  = 20   # skip stories with fewer points
+HN_AI_QUERIES  = [    # run each query; results are merged + deduped by story ID
+    "large language model LLM",
+    "AI agent reasoning",
+    "diffusion model image generation",
+    "transformer architecture neural network",
+    "foundation model multimodal",
+]
+
+# GitHub Topics Search API
+GITHUB_TOPICS    = ["llm", "ai-agent", "large-language-model",
+                    "diffusion-model", "ai-safety", "transformer"]
+GITHUB_MIN_STARS = 100   # skip repos below this star count
+GITHUB_PER_TOPIC = 15    # max repos per topic per run
+# Set GITHUB_TOKEN in .env for 5000 req/hr (vs 60 unauthenticated)
+
+# Leaderboards — snapshot-diff (only emit signals for NEW top-N entries)
+LEADERBOARD_TOP_N      = 20   # track top N models per leaderboard
+LEADERBOARD_SNAPSHOT   = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "sources", "leaderboard_snapshot.json",
+)
 
 # Enrichment — Haiku for classification + brief summary (all signals)
 ENRICH_MODEL   = "claude-haiku-4-5-20251001"
@@ -705,6 +733,399 @@ def fetch_rss_feeds(existing_urls: set[str], rss_sources: list[dict]) -> tuple[l
     return raw, errors
 
 
+def fetch_hn(existing_urls: set[str]) -> tuple[list[dict], list[str]]:
+    """
+    Fetch recent AI/ML stories from HackerNews via the Algolia search API.
+    Runs multiple keyword queries and deduplicates by HN story ID.
+    No API key required; rate limit is generous for daily pipelines.
+    """
+    raw, errors = [], []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
+    seen_ids: set[str] = set()
+
+    for query in HN_AI_QUERIES:
+        try:
+            resp = requests.get(
+                "https://hn.algolia.com/api/v1/search_by_date",
+                params={
+                    "tags":           "story",
+                    "query":          query,
+                    "numericFilters": (
+                        f"points>={HN_MIN_POINTS},"
+                        f"created_at_i>{int(cutoff.timestamp())}"
+                    ),
+                    "hitsPerPage":    50,
+                },
+                headers={"User-Agent": "frontier-tech-pipeline/1.0"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            hits = resp.json().get("hits", [])
+
+            for hit in hits:
+                story_id = hit.get("objectID", "")
+                if not story_id or story_id in seen_ids:
+                    continue
+                seen_ids.add(story_id)
+
+                # Prefer the linked URL; fall back to HN discussion page
+                ext_url = hit.get("url", "")
+                hn_url  = f"https://news.ycombinator.com/item?id={story_id}"
+                url     = ext_url if ext_url else hn_url
+                if url in existing_urls:
+                    continue
+
+                created_at = hit.get("created_at", "")
+                pub_dt = _parse_iso(created_at) if created_at else None
+
+                points      = hit.get("points", 0)
+                num_comments = hit.get("num_comments", 0)
+                story_text  = _strip_html(hit.get("story_text") or "")
+
+                parts = []
+                if story_text:
+                    parts.append(story_text[:500])
+                parts.append(f"HN Points: {points} | Comments: {num_comments}")
+                if ext_url:
+                    parts.append(f"HN Discussion: {hn_url}")
+
+                raw.append({
+                    "_url":          url,
+                    "_source_id":    HN_SOURCE_ID,
+                    "_title":        hit.get("title", ""),
+                    "_excerpt":      " | ".join(parts)[:1000],
+                    "_author":       hit.get("author", ""),
+                    "_published_at": _iso(pub_dt) if pub_dt else "",
+                })
+
+            time.sleep(0.25)   # Algolia rate limit: generous but be polite
+
+        except Exception as e:
+            msg = f"HackerNews query '{query[:30]}' failed: {e}"
+            log.warning(msg)
+            errors.append(msg)
+
+    log.info("HackerNews: %d new items (%d unique stories seen)", len(raw), len(seen_ids))
+    return raw, errors
+
+
+def fetch_github(existing_urls: set[str]) -> tuple[list[dict], list[str]]:
+    """
+    Fetch recently-active AI/ML repositories via the GitHub Search Topics API.
+    Filters by star count and recent push date; deduplicates by repo ID.
+
+    Set GITHUB_TOKEN in .env to increase rate limit from 60 → 5000 req/hr.
+    """
+    raw, errors = [], []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
+    seen_ids: set[int] = set()
+
+    session = requests.Session()
+    session.headers.update({
+        "Accept":               "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent":           "frontier-tech-pipeline/1.0",
+    })
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    if github_token:
+        session.headers["Authorization"] = f"Bearer {github_token}"
+        log.info("GitHub: authenticated (5000 req/hr)")
+    else:
+        log.info("GitHub: unauthenticated (60 req/hr) — set GITHUB_TOKEN in .env to increase")
+
+    cutoff_date = cutoff.strftime("%Y-%m-%d")
+
+    for topic in GITHUB_TOPICS:
+        try:
+            resp = session.get(
+                "https://api.github.com/search/repositories",
+                params={
+                    "q":        f"topic:{topic} stars:>={GITHUB_MIN_STARS} pushed:>{cutoff_date}",
+                    "sort":     "stars",
+                    "order":    "desc",
+                    "per_page": GITHUB_PER_TOPIC,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            items = resp.json().get("items", [])
+
+            for repo in items:
+                repo_id = repo.get("id")
+                if not repo_id or repo_id in seen_ids:
+                    continue
+                seen_ids.add(repo_id)
+
+                url = repo.get("html_url", "")
+                if not url or url in existing_urls:
+                    continue
+
+                pushed_at = repo.get("pushed_at", "")
+                pub_dt = _parse_iso(pushed_at) if pushed_at else None
+                if pub_dt and pub_dt < cutoff:
+                    continue
+
+                description = (repo.get("description") or "").strip()
+                stars    = repo.get("stargazers_count", 0)
+                forks    = repo.get("forks_count", 0)
+                language = repo.get("language") or ""
+                topics   = repo.get("topics", [])
+
+                parts = []
+                if description:
+                    parts.append(description[:400])
+                parts.append(f"Stars: {stars:,} | Forks: {forks:,}")
+                if language:
+                    parts.append(f"Language: {language}")
+                if topics:
+                    parts.append(f"Topics: {', '.join(topics[:8])}")
+
+                raw.append({
+                    "_url":          url,
+                    "_source_id":    GITHUB_SOURCE_ID,
+                    "_title":        repo.get("full_name", ""),
+                    "_excerpt":      " | ".join(parts)[:1000],
+                    "_author":       (repo.get("owner") or {}).get("login", ""),
+                    "_published_at": _iso(pub_dt) if pub_dt else "",
+                })
+
+            log.info("GitHub %-28s %d new repos", f"topic:{topic}:", len(raw))
+            time.sleep(1.0)   # GitHub search API: 30 req/min for auth, 10 for anon
+
+        except Exception as e:
+            msg = f"GitHub topic '{topic}' failed: {e}"
+            log.warning(msg)
+            errors.append(msg)
+
+    log.info("GitHub:     %d new items total (%d repos seen)", len(raw), len(seen_ids))
+    return raw, errors
+
+
+def _load_leaderboard_snapshot() -> dict:
+    try:
+        with open(LEADERBOARD_SNAPSHOT, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_leaderboard_snapshot(snapshot: dict) -> None:
+    os.makedirs(os.path.dirname(LEADERBOARD_SNAPSHOT), exist_ok=True)
+    try:
+        with open(LEADERBOARD_SNAPSHOT, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2)
+    except Exception as e:
+        log.warning("Could not save leaderboard snapshot: %s", e)
+
+
+def fetch_leaderboards(existing_urls: set[str]) -> tuple[list[dict], list[str]]:
+    """
+    Snapshot-diff fetcher for two leaderboards:
+
+    1. HF Open LLM Leaderboard v2 — downloads the public parquet file
+       (~1.1 MB), sorts by composite average score, emits signals for
+       models newly entering the top N.  Requires: pandas, pyarrow.
+
+    2. Chatbot Arena (MT-bench) — fetches the most recent
+       leaderboard_table_*.csv from the LMSYS HF Space, emits signals
+       for models newly entering the top N by MT-bench score.
+       Note: lmarena.ai API is not publicly accessible; this source uses
+       the LMSYS HF Space snapshots (last updated ~Aug 2025 at time of
+       writing — switch to lmarena.ai API if/when they open it).
+
+    Only emits signals for models *new* since the last run.
+    Snapshot stored at sources/leaderboard_snapshot.json.
+    """
+    try:
+        import io
+        import pandas as pd
+    except ImportError:
+        msg = "Leaderboard fetcher requires pandas + pyarrow — run: pip install pandas pyarrow"
+        log.error(msg)
+        return [], [msg]
+
+    raw, errors = [], []
+    snapshot     = _load_leaderboard_snapshot()
+    new_snapshot = dict(snapshot)
+
+    # ── 1. HF Open LLM Leaderboard v2 (parquet) ──────────────────────────────
+    try:
+        # Resolve current parquet URL via the datasets-server (avoids hardcoding SHA)
+        meta = requests.get(
+            "https://datasets-server.huggingface.co/parquet",
+            params={"dataset": "open-llm-leaderboard/contents"},
+            timeout=15,
+        )
+        meta.raise_for_status()
+        parquet_url = meta.json()["parquet_files"][0]["url"]
+
+        resp = requests.get(parquet_url, timeout=60)
+        resp.raise_for_status()
+        df = pd.read_parquet(io.BytesIO(resp.content))
+
+        # Sort by composite average score, take top N
+        score_col = "Average ⬆️"
+        df = df.sort_values(score_col, ascending=False).head(LEADERBOARD_TOP_N * 2)
+
+        known_hf = set(snapshot.get("hf_leaderboard", []))
+        new_hf: list[str] = []
+        rank = 0
+
+        for _, row in df.iterrows():
+            if rank >= LEADERBOARD_TOP_N:
+                break
+            model_id = str(row.get("fullname", "")).strip()
+            if not model_id:
+                continue
+            rank += 1
+
+            if model_id in known_hf:
+                continue
+
+            url = f"https://huggingface.co/{model_id}"
+            if url in existing_urls:
+                known_hf.add(model_id)
+                continue
+
+            avg_score = row.get(score_col, 0)
+            sub_date  = str(row.get("Submission Date", "")).strip()
+            params_b  = row.get("#Params (B)", "")
+            arch      = str(row.get("Architecture", "")).strip()
+
+            # Gather individual benchmark scores for the excerpt
+            bench_scores = []
+            for bench in ["IFEval", "BBH", "MATH Lvl 5", "GPQA", "MUSR", "MMLU-PRO"]:
+                val = row.get(bench)
+                if val is not None and not (isinstance(val, float) and val != val):
+                    bench_scores.append(f"{bench}: {val:.1f}")
+
+            excerpt_parts = [
+                f"HF Open LLM Leaderboard rank #{rank} | Avg score: {avg_score:.2f}",
+            ]
+            if bench_scores:
+                excerpt_parts.append(" | ".join(bench_scores[:4]))
+            if arch:
+                excerpt_parts.append(f"Architecture: {arch}")
+            if params_b:
+                excerpt_parts.append(f"Params: {params_b}B")
+
+            pub_str = sub_date if sub_date and sub_date != "nan" else ""
+            pub_dt  = _parse_iso(pub_str) if pub_str else None
+
+            raw.append({
+                "_url":          url,
+                "_source_id":    HF_LEADERBOARD_SRC,
+                "_title":        f"[HF Leaderboard #{rank}] {model_id}",
+                "_excerpt":      " | ".join(excerpt_parts)[:1000],
+                "_author":       model_id.split("/")[0] if "/" in model_id else "",
+                "_published_at": _iso(pub_dt) if pub_dt else "",
+            })
+            new_hf.append(model_id)
+            known_hf.add(model_id)
+
+        new_snapshot["hf_leaderboard"] = list(known_hf)
+        log.info("HF Leaderboard:  %d new models (top %d by avg score)", len(new_hf), LEADERBOARD_TOP_N)
+
+    except Exception as e:
+        msg = f"HF Leaderboard fetch failed: {e}"
+        log.error(msg)
+        errors.append(msg)
+
+    # ── 2. Chatbot Arena — most recent leaderboard CSV from LMSYS HF Space ───
+    # Note: lmarena.ai API is not publicly accessible. This uses LMSYS HF Space
+    # snapshots (leaderboard_table_YYYYMMDD.csv).  If the space stops updating,
+    # this source goes quiet until a replacement API is available.
+    try:
+        # Dynamically find the most recent leaderboard_table_*.csv in the space
+        space_meta = requests.get(
+            "https://huggingface.co/api/spaces/lmsys/chatbot-arena-leaderboard",
+            timeout=15,
+        )
+        space_meta.raise_for_status()
+        siblings = space_meta.json().get("siblings", [])
+
+        csv_files = sorted(
+            [s["rfilename"] for s in siblings
+             if s["rfilename"].startswith("leaderboard_table_") and s["rfilename"].endswith(".csv")],
+            reverse=True,
+        )
+        if not csv_files:
+            raise ValueError("No leaderboard CSVs found in LMSYS HF Space")
+
+        latest_csv = csv_files[0]
+        csv_date   = latest_csv.replace("leaderboard_table_", "").replace(".csv", "")
+        log.info("Chatbot Arena: using %s", latest_csv)
+
+        csv_resp = requests.get(
+            f"https://huggingface.co/spaces/lmsys/chatbot-arena-leaderboard/resolve/main/{latest_csv}",
+            timeout=30,
+        )
+        csv_resp.raise_for_status()
+
+        # Parse CSV: key,Model,MT-bench (score),MMLU,...,Organization,Link
+        import csv as csv_mod
+        reader     = csv_mod.DictReader(csv_resp.text.splitlines())
+        arena_rows = list(reader)
+
+        # Sort by MT-bench score descending
+        def _mt(r):
+            try:
+                return float(r.get("MT-bench (score)", 0) or 0)
+            except ValueError:
+                return 0.0
+
+        arena_rows.sort(key=_mt, reverse=True)
+
+        known_arena = set(snapshot.get("chatbot_arena", []))
+        new_arena: list[str] = []
+
+        for rank, row in enumerate(arena_rows[:LEADERBOARD_TOP_N], start=1):
+            model_name = row.get("Model", "").strip()
+            if not model_name or model_name in known_arena:
+                continue
+
+            safe_key = model_name.replace(" ", "-").replace("/", "-").replace(":", "")
+            url = f"arena://chatbot-arena/{safe_key}"
+            if url in existing_urls:
+                known_arena.add(model_name)
+                continue
+
+            mt_score = row.get("MT-bench (score)", "")
+            mmlu     = row.get("MMLU", "")
+            org      = row.get("Organization", "")
+            license_ = row.get("License", "")
+            link     = row.get("Link", "")
+
+            excerpt = (
+                f"Chatbot Arena rank #{rank} (MT-bench) | "
+                f"MT-bench: {mt_score} | MMLU: {mmlu} | "
+                f"Org: {org} | License: {license_} | Data: {csv_date}"
+            )
+
+            raw.append({
+                "_url":          url,
+                "_source_id":    ARENA_SOURCE_ID,
+                "_title":        f"[Chatbot Arena #{rank}] {model_name}",
+                "_excerpt":      excerpt[:1000],
+                "_author":       org,
+                "_published_at": "",
+            })
+            new_arena.append(model_name)
+            known_arena.add(model_name)
+
+        new_snapshot["chatbot_arena"] = list(known_arena)
+        log.info("Chatbot Arena:   %d new models (top %d by MT-bench)", len(new_arena), LEADERBOARD_TOP_N)
+
+    except Exception as e:
+        msg = f"Chatbot Arena fetch failed: {e}"
+        log.warning(msg)
+        errors.append(msg)
+
+    _save_leaderboard_snapshot(new_snapshot)
+    log.info("Leaderboards: %d new items total", len(raw))
+    return raw, errors
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # ENRICHMENT
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1144,6 +1565,24 @@ def run(sources: str = "all", dry_run: bool = False) -> None:
         all_errors.extend(errs)
         sources_evaluated += len(reddit_sources)
 
+    if sources in ("all", "hn"):
+        raw, errs = fetch_hn(existing_urls)
+        all_raw.extend(raw)
+        all_errors.extend(errs)
+        sources_evaluated += 1
+
+    if sources in ("all", "github"):
+        raw, errs = fetch_github(existing_urls)
+        all_raw.extend(raw)
+        all_errors.extend(errs)
+        sources_evaluated += len(GITHUB_TOPICS)
+
+    if sources in ("all", "leaderboards"):
+        raw, errs = fetch_leaderboards(existing_urls)
+        all_raw.extend(raw)
+        all_errors.extend(errs)
+        sources_evaluated += 2   # HF Leaderboard + Chatbot Arena
+
     if sources in ("all", "harmonic"):
         raw, errs = fetch_harmonic_reports(existing_urls, client)
         all_raw.extend(raw)
@@ -1202,7 +1641,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Frontier Tech ingestion pipeline")
     parser.add_argument(
         "--source",
-        choices=["all", "papers", "models", "rss", "arxiv", "harmonic", "reddit"],
+        choices=["all", "papers", "models", "rss", "arxiv", "harmonic", "reddit",
+                 "hn", "github", "leaderboards"],
         default="all",
         help="Which source group to run (default: all)",
     )
